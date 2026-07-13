@@ -22,7 +22,7 @@ An open-source role-based permission management system for the [Pterodactyl Pane
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/Pterodactyl-Admin-Permissions.git
+git clone https://github.com/Pratech1015/Pterodactyl-Admin-Permissions.git
 cd Pterodactyl-Admin-Permissions
 
 # Run the installer (default panel path: /var/www/pterodactyl)
