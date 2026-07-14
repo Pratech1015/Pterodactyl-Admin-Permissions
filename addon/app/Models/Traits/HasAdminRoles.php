@@ -81,7 +81,12 @@ trait HasAdminRoles
     public function getAdminPermissions(): array
     {
         if ($this->root_admin) {
-            return array_keys(config('permissions.permissions', []) ... array_values(config('permissions.permissions', [])));
+            $allPermissions = [];
+            foreach (config('permissions.permissions', []) as $section) {
+                $allPermissions = array_merge($allPermissions, $section);
+            }
+
+            return array_keys($allPermissions);
         }
 
         $permissions = [];
