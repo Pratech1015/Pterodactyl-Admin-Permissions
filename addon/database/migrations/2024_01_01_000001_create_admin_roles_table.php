@@ -27,11 +27,16 @@ return new class extends Migration
 
         Schema::create('admin_user_roles', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->unsignedInteger('user_id');
             $table->foreignId('admin_role_id')->constrained()->cascadeOnDelete();
             $table->timestamps();
 
             $table->unique(['user_id', 'admin_role_id']);
+
+            $table->foreign('user_id')
+                ->references('id')
+                ->on('users')
+                ->onDelete('cascade');
         });
     }
 
