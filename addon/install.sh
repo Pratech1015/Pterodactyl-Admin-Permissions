@@ -15,7 +15,7 @@ NC='\033[0m' # No Color
 PANEL_PATH="${1:-/var/www/pterodactyl}"
 
 echo -e "${YELLOW}Pterodactyl Admin Permissions Manager Installer${NC}"
-echo "================================================"
+echo "====================================================="
 echo ""
 
 # Check if panel path exists
@@ -39,6 +39,36 @@ echo ""
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Define backup function
+create_backup() {
+    local file="$1"
+    if [ -f "$file" ] && [ ! -f "${file}.bak" ]; then
+        cp "$file" "${file}.bak"
+        echo -e "${GREEN}Created backup of $(basename "$file")${NC}"
+    fi
+}
+
+# Define validation & restore function
+validate_php_file() {
+    local file="$1"
+    if ! php -l "$file" > /dev/null 2>&1; then
+        echo -e "${RED}Syntax validation failed for $(basename "$file")!${NC}"
+        if [ -f "${file}.bak" ]; then
+            echo -e "${YELLOW}Restoring backup of $(basename "$file")...${NC}"
+            cp "${file}.bak" "$file"
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# Determine web server user/group from existing files (e.g., storage or bootstrap/cache)
+PANEL_OWNER=$(stat -c '%U' "$PANEL_PATH/bootstrap/cache" 2>/dev/null || stat -c '%U' "$PANEL_PATH/storage" 2>/dev/null || echo "www-data")
+PANEL_GROUP=$(stat -c '%G' "$PANEL_PATH/bootstrap/cache" 2>/dev/null || stat -c '%G' "$PANEL_PATH/storage" 2>/dev/null || echo "www-data")
+
+echo -e "${YELLOW}Detected panel file owner: $PANEL_OWNER:$PANEL_GROUP${NC}"
+echo ""
+
 echo -e "${YELLOW}Step 1: Copying addon files...${NC}"
 
 # Create addon directories in panel
@@ -55,58 +85,97 @@ cp "$SCRIPT_DIR/app/Models/AdminRolePermission.php" "$PANEL_PATH/app/Models/"
 cp "$SCRIPT_DIR/app/Models/AdminUserRole.php" "$PANEL_PATH/app/Models/"
 cp "$SCRIPT_DIR/app/Models/Traits/HasAdminRoles.php" "$PANEL_PATH/app/Models/Traits/"
 cp "$SCRIPT_DIR/app/Http/Middleware/AdminPermissionMiddleware.php" "$PANEL_PATH/app/Http/Middleware/"
+cp "$SCRIPT_DIR/app/Http/Middleware/InjectSidebarMiddleware.php" "$PANEL_PATH/app/Http/Middleware/"
 cp "$SCRIPT_DIR/app/Http/Controllers/Admin/AdminRoleController.php" "$PANEL_PATH/app/Http/Controllers/Admin/"
 cp "$SCRIPT_DIR/app/Providers/AdminPermissionsServiceProvider.php" "$PANEL_PATH/app/Providers/"
 cp "$SCRIPT_DIR/config/permissions.php" "$PANEL_PATH/config/permissions.php"
 cp "$SCRIPT_DIR/routes/admin.php" "$PANEL_PATH/routes/admin-roles.php"
 cp -r "$SCRIPT_DIR/resources/views/admin/roles/"* "$PANEL_PATH/resources/views/admin/roles/"
 
-echo -e "${GREEN}Files copied successfully.${NC}"
+# Validate added PHP files
+for file in "$PANEL_PATH/app/Models/AdminRole.php" \
+            "$PANEL_PATH/app/Models/AdminRolePermission.php" \
+            "$PANEL_PATH/app/Models/AdminUserRole.php" \
+            "$PANEL_PATH/app/Models/Traits/HasAdminRoles.php" \
+            "$PANEL_PATH/app/Http/Middleware/AdminPermissionMiddleware.php" \
+            "$PANEL_PATH/app/Http/Middleware/InjectSidebarMiddleware.php" \
+            "$PANEL_PATH/app/Http/Controllers/Admin/AdminRoleController.php" \
+            "$PANEL_PATH/app/Providers/AdminPermissionsServiceProvider.php" \
+            "$PANEL_PATH/config/permissions.php" \
+            "$PANEL_PATH/routes/admin-roles.php"; do
+    if [ -f "$file" ]; then
+        if ! validate_php_file "$file"; then
+            echo -e "${RED}Installation aborted due to a syntax error in copied files.${NC}"
+            exit 1
+        fi
+    fi
+done
+
+echo -e "${GREEN}Files copied and validated successfully.${NC}"
 echo ""
 
-echo -e "${YELLOW}Step 2: Running database migrations...${NC}"
+echo -e "${YELLOW}Step 2: Copying database migrations...${NC}"
 
 # Copy migrations
 cp "$SCRIPT_DIR/database/migrations/"*.php "$PANEL_PATH/database/migrations/"
 
-cd "$PANEL_PATH"
-php artisan migrate --force
-
-echo -e "${GREEN}Migrations completed.${NC}"
+echo -e "${GREEN}Migrations copied.${NC}"
 echo ""
 
 echo -e "${YELLOW}Step 3: Registering service provider...${NC}"
 
-# Check if already registered
-if grep -q "AdminPermissionsServiceProvider" "$PANEL_PATH/config/app.php"; then
-    echo -e "${GREEN}Service provider already registered.${NC}"
+# Detect if Laravel uses config/app.php or bootstrap/providers.php (Laravel 11+)
+PROVIDERS_FILE=""
+if [ -f "$PANEL_PATH/bootstrap/providers.php" ]; then
+    PROVIDERS_FILE="$PANEL_PATH/bootstrap/providers.php"
+elif [ -f "$PANEL_PATH/config/app.php" ]; then
+    PROVIDERS_FILE="$PANEL_PATH/config/app.php"
+fi
+
+if [ -n "$PROVIDERS_FILE" ]; then
+    create_backup "$PROVIDERS_FILE"
+    
+    # Idempotent registration check
+    if grep -q "AdminPermissionsServiceProvider" "$PROVIDERS_FILE"; then
+        echo -e "${GREEN}Service provider already registered in $(basename "$PROVIDERS_FILE").${NC}"
+    else
+        if [ "$(basename "$PROVIDERS_FILE")" = "providers.php" ]; then
+            # Insert before the closing bracket of the return array
+            sed -i "/];/i\\    Pterodactyl\\\\Providers\\\\AdminPermissionsServiceProvider::class," "$PROVIDERS_FILE"
+        else
+            # Insert after AppServiceProvider in config/app.php
+            sed -i "/Pterodactyl\\\\Providers\\\\AppServiceProvider/a\\
+\\        Pterodactyl\\\\Providers\\\\AdminPermissionsServiceProvider::class," "$PROVIDERS_FILE"
+        fi
+        
+        # Validate syntax
+        if ! validate_php_file "$PROVIDERS_FILE"; then
+            echo -e "${RED}Failed to register service provider safely. Restoring configuration.${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}Service provider registered in $(basename "$PROVIDERS_FILE").${NC}"
+    fi
 else
-    # Add service provider to config/app.php
-    sed -i "/Pterodactyl\\\\Providers\\\\AppServiceProvider/a\\
-\\
-\\        /*\\
-\\         * Pterodactyl Admin Permissions Manager\\
-\\         */\\
-\\        Pterodactyl\\\\Providers\\\\AdminPermissionsServiceProvider::class," "$PANEL_PATH/config/app.php"
-    echo -e "${GREEN}Service provider registered.${NC}"
+    echo -e "${RED}Error: Could not locate config/app.php or bootstrap/providers.php.${NC}"
+    exit 1
 fi
 echo ""
 
 echo -e "${YELLOW}Step 4: Patching AdminAuthenticate middleware...${NC}"
 
-# Backup original AdminAuthenticate middleware
-if [ ! -f "$PANEL_PATH/app/Http/Middleware/AdminAuthenticate.php.bak" ]; then
-    cp "$PANEL_PATH/app/Http/Middleware/AdminAuthenticate.php" "$PANEL_PATH/app/Http/Middleware/AdminAuthenticate.php.bak"
-    echo -e "${GREEN}Backup created: AdminAuthenticate.php.bak${NC}"
-fi
-
-# Replace AdminAuthenticate with permission-aware version
-cat > "$PANEL_PATH/app/Http/Middleware/AdminAuthenticate.php" << 'PATCH'
+MIDDLEWARE_FILE="$PANEL_PATH/app/Http/Middleware/AdminAuthenticate.php"
+if [ -f "$MIDDLEWARE_FILE" ]; then
+    create_backup "$MIDDLEWARE_FILE"
+    
+    # Replace with permission-aware implementation
+    cat > "$MIDDLEWARE_FILE" << 'PATCH'
 <?php
 
 namespace Pterodactyl\Http\Middleware;
 
+use Closure;
 use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 
 class AdminAuthenticate
@@ -119,7 +188,7 @@ class AdminAuthenticate
      *
      * @throws AccessDeniedHttpException
      */
-    public function handle(Request $request, \Closure $next): mixed
+    public function handle(Request $request, Closure $next): Response
     {
         if (!$request->user()) {
             throw new AccessDeniedHttpException();
@@ -140,72 +209,97 @@ class AdminAuthenticate
 }
 PATCH
 
-echo -e "${GREEN}AdminAuthenticate middleware patched.${NC}"
-echo ""
-
-echo -e "${YELLOW}Step 5: Patching admin layout sidebar...${NC}"
-
-# Add Roles link to admin sidebar
-ADMIN_LAYOUT="$PANEL_PATH/resources/views/layouts/admin.blade.php"
-
-if [ -f "$ADMIN_LAYOUT" ]; then
-    if ! grep -q "admin.roles.index" "$ADMIN_LAYOUT"; then
-        # Add roles menu item before the closing sidebar-menu ul
-        sed -i '/<\/ul>/i\
-                        <li class="{{ ! starts_with(Route::currentRouteName(), .admin.roles.) ?: .active. }}">\
-                            <a href="{{ route(.admin.roles.index.) }}">\
-                                <i class="fa fa-shield"></i> <span>Roles</span>\
-                            </a>\
-                        </li>' "$ADMIN_LAYOUT"
-        echo -e "${GREEN}Roles menu item added to sidebar.${NC}"
-    else
-        echo -e "${GREEN}Roles menu item already exists in sidebar.${NC}"
+    if ! validate_php_file "$MIDDLEWARE_FILE"; then
+        echo -e "${RED}Failed to patch AdminAuthenticate middleware safely. Restoring.${NC}"
+        exit 1
     fi
+    echo -e "${GREEN}AdminAuthenticate middleware patched and validated.${NC}"
 else
-    echo -e "${YELLOW}Warning: Admin layout not found. Please manually add the Roles menu item.${NC}"
+    echo -e "${RED}Error: AdminAuthenticate middleware not found at $MIDDLEWARE_FILE.${NC}"
+    exit 1
 fi
 echo ""
 
-echo -e "${YELLOW}Step 6: Patching User model...${NC}"
+echo -e "${YELLOW}Step 5: Patching User model...${NC}"
 
 USER_MODEL="$PANEL_PATH/app/Models/User.php"
-
 if [ -f "$USER_MODEL" ]; then
+    create_backup "$USER_MODEL"
+    
     if ! grep -q "HasAdminRoles" "$USER_MODEL"; then
-        # Add use statement
+        # Add use statement after namespace or namespace use block
         sed -i "/use Pterodactyl\\\\Traits\\\\Helpers\\\\AvailableLanguages;/a\\
 use Pterodactyl\\\\Models\\\\Traits\\\\HasAdminRoles;" "$USER_MODEL"
 
-        # Add trait usage
+        # Add trait usage after AvailableLanguages trait usage
         sed -i "/use AvailableLanguages;/a\\
     use HasAdminRoles;" "$USER_MODEL"
 
-        echo -e "${GREEN}User model patched with HasAdminRoles trait.${NC}"
+        if ! validate_php_file "$USER_MODEL"; then
+            echo -e "${RED}Failed to patch User model safely. Restoring.${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}User model patched and validated with HasAdminRoles trait.${NC}"
     else
-        echo -e "${GREEN}User model already patched.${NC}"
+        echo -e "${GREEN}User model already patched with HasAdminRoles trait.${NC}"
     fi
 else
-    echo -e "${YELLOW}Warning: User model not found. Please manually add the HasAdminRoles trait.${NC}"
+    echo -e "${RED}Error: User model not found at $USER_MODEL.${NC}"
+    exit 1
 fi
 echo ""
 
-echo -e "${YELLOW}Step 7: Clearing caches...${NC}"
+# Run Laravel commands as the appropriate web server user (if possible) or root and fix permissions
+run_artisan() {
+    local cmd="$1"
+    if [ "$(id -u)" -eq 0 ]; then
+        # Running as root, try running as the web user or fall back to root and then fix permissions
+        if id "$PANEL_OWNER" >/dev/null 2>&1; then
+            sudo -u "$PANEL_OWNER" php "$PANEL_PATH/artisan" $cmd
+        else
+            php "$PANEL_PATH/artisan" $cmd
+        fi
+    else
+        # Not root, run directly
+        php "$PANEL_PATH/artisan" $cmd
+    fi
+}
 
-cd "$PANEL_PATH"
-php artisan config:cache
-php artisan route:cache
-php artisan view:cache
-
-echo -e "${GREEN}Caches cleared.${NC}"
+echo -e "${YELLOW}Step 6: Running database migrations...${NC}"
+run_artisan "migrate --force"
+echo -e "${GREEN}Database migrations completed successfully.${NC}"
 echo ""
 
-echo "================================================"
-echo -e "${GREEN}Installation complete!${NC}"
+echo -e "${YELLOW}Step 7: Clearing and rebuilding caches...${NC}"
+run_artisan "config:clear"
+run_artisan "route:clear"
+run_artisan "view:clear"
+run_artisan "config:cache"
+run_artisan "route:cache"
+run_artisan "view:cache"
+echo -e "${GREEN}Caches successfully optimized.${NC}"
+echo ""
+
+# Ensure all permissions and ownerships are correct on bootstrap/cache and storage
+if [ "$(id -u)" -eq 0 ]; then
+    echo -e "${YELLOW}Step 8: Fixing file ownership to $PANEL_OWNER:$PANEL_GROUP...${NC}"
+    chown -R "$PANEL_OWNER:$PANEL_GROUP" "$PANEL_PATH/bootstrap/cache" "$PANEL_PATH/storage"
+    echo -e "${GREEN}Ownership and permissions verified.${NC}"
+    echo ""
+fi
+
+echo "====================================================="
+echo -e "${GREEN}Installation completed successfully!${NC}"
+echo ""
+echo "Notes:"
+echo "  - Added dynamic sidebar link without modifying blade layouts."
+echo "  - Ensured all patched files have valid PHP syntax."
+echo "  - Restored proper owner/permissions on cache and storage directories."
 echo ""
 echo "Next steps:"
-echo "  1. Create your first admin role at /admin/roles"
-echo "  2. Assign roles to users who need limited admin access"
-echo "  3. Root administrators retain full access by default"
+echo "  1. Log in to your Pterodactyl admin area."
+echo "  2. Go to the brand new 'Roles' section in the sidebar."
+echo "  3. Create roles and assign permissions as needed."
 echo ""
 echo "To uninstall, run: bash $SCRIPT_DIR/uninstall.sh $PANEL_PATH"
-echo "================================================"
+echo "====================================================="

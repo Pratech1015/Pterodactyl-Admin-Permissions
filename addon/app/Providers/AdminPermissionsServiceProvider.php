@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Blade;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Pterodactyl\Http\Middleware\AdminPermissionMiddleware;
+use Pterodactyl\Http\Middleware\InjectSidebarMiddleware;
 
 class AdminPermissionsServiceProvider extends ServiceProvider
 {
@@ -24,6 +25,9 @@ class AdminPermissionsServiceProvider extends ServiceProvider
     {
         // Register middleware
         $this->app['router']->aliasMiddleware('admin.permission', AdminPermissionMiddleware::class);
+
+        // Dynamically push sidebar injection middleware to the web middleware group
+        $this->app['router']->pushMiddlewareToGroup('web', InjectSidebarMiddleware::class);
 
         // Register routes
         $this->registerRoutes();
